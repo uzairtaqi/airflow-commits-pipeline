@@ -1,26 +1,36 @@
 import os
 import requests 
 import sqlite3
+import time
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 #Extracting commits from main airflow repo on github
 def extract():
 
+    headers = {"Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2026-03-10"}
+    
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
     page = 1
     all_commits = []
+    url = "https://api.github.com/repos/apache/airflow/commits"
+    sha = "main"
+    since = "2026-01-01T00:00:00Z"
+    until = "2026-02-01T00:00:00Z"
+    per_page = 100
 
     while True:
         #sending get request with params that we need to filter for
-        response = requests.get(
-            "https://api.github.com/repos/apache/airflow/commits",
-            headers = {"Accept": "application/vnd.github+json",
-                       "X-GitHub-Api-Version": "2026-03-10"},
+        response = requests.get(url,
+            headers = headers,
             params = {
-                "sha": "main", 
-                "since": "2026-01-01T00:00:00Z",
-                "until": "2026-02-01T00:00:00Z",
-                "per_page": 100,
+                "sha": sha,
+                "since": since,
+                "until": until,
+                "per_page": per_page,
                 "page": page
             }
         )
@@ -34,36 +44,38 @@ def extract():
 
         #when no more commits exist then exit loop
         if len(commits) == 0:
-            print(f"No commits left to extract.")
+            print(f"No more commits left to extract.")
             print(f"Total commits found: {len(all_commits)}")
             break
 
         all_commits.extend(commits) #adds each commit to the list
 
         page += 1 
+        time.sleep(0.5)
 
     return all_commits 
 
+#Transforming the data from raw
 def transform(data):
     
     #getting nested objects
-    commit = data.get("commit")
-    git_author = data.get("author")
-    git_committer = data.get("committer")
-    author = commit.get("author")
-    committer = commit.get("committer")
-    verification = commit.get("verification")
+    commit = data.get("commit") or {}
+    git_author = data.get("author") or {}
+    git_committer = data.get("committer") or {}
+    author = commit.get("author") or {}
+    committer = commit.get("committer") or {}
+    verification = commit.get("verification") or {}
 
-    #only getting data that is needed
+    #getting data points
     return {
      "sha": data.get("sha"),
      "message": commit.get("message"),
-     "author_name": author.get("name"),
-     "author_email": author.get("email"),
+     "author_name": (author.get("name") or "").strip() or None,
+     "author_email": (author.get("email") or "").lower(),
      "authored_at": author.get("date"),
      "authored_date": author.get("date")[:10],
-     "committer_name": committer.get("name"),
-     "committer_email": committer.get("email"),
+     "committer_name": (committer.get("name") or "").strip() or None,
+     "committer_email": (committer.get("email") or "").lower(),
      "committer_at": committer.get("date"),
      "committer_date": committer.get("date")[:10],
      "verified": verification.get("verified"),
@@ -77,6 +89,7 @@ def transform(data):
      "html_url": data.get("html_url")
     }
 
+#Loading data into SQLite
 def load(commits):
 
     #connect to db
@@ -108,7 +121,7 @@ def load(commits):
                    )
                    ''')
     
-    print(f"Table Created")
+    print("Table Created")
 
     #batch insert data
     cursor.executemany('''
@@ -127,19 +140,26 @@ def load(commits):
         c['committer_type'], c['html_url']
     ) for c in commits])
 
-    print(f"Data Inserted")
+    print(f"Data Inserted: {len(commits)} rows")
 
     conn.commit()
     conn.close()
 
-#Call Extract
-extracted_commits = extract()
+def main():
+    #Call Extract
+    extracted_commits = extract()
+    if not extracted_commits:
+        print("No commits extracted. Ending.")
+        quit()
 
-#Call Transform
-records = []
-for commit in extracted_commits:
-    result = transform(commit)
-    records.append(result)
-    
-#Call Load 
-load(records)
+    #Call Transform
+    records = []
+    for commit in extracted_commits:
+        result = transform(commit)
+        records.append(result)
+
+    #Call Load 
+    load(records)
+
+if __name__ == "__main__":
+    main()
